@@ -1,5 +1,5 @@
-flask
-googlemaps
-geopy
-regex
-gunicorn
+Flask==3.0.3
+requests==2.32.3
+geopy==2.4.1
+googlemaps==4.10.0
+gunicorn==23.0.0
