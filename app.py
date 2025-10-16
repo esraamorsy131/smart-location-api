@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from flask import Flask, request, jsonify
 from math import radians, sin, cos, sqrt, atan2
 
@@ -52,23 +51,6 @@ def haversine(lat1, lon1, lat2, lon2):
     a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
     return round(R * 2 * atan2(sqrt(a), sqrt(1 - a)), 2)
 
-def extract_duration_direction(text):
-    if not text:
-        return {"duration": None, "direction": None}
-    t = str(text).lower()
-    duration = re.search(r"(day|days|week|weeks|two weeks|month|months)", t)
-    direction = None
-    if any(x in t for x in ["going","depart","one way"]):
-        direction = "going"
-    elif any(x in t for x in ["return","back","round"]):
-        direction = "return"
-    return {
-        "duration_en": duration.group(0) if duration else None,
-        "direction_en": direction,
-        "duration_ar": translate_duration(duration.group(0)) if duration else None,
-        "direction_ar": translate_direction(direction) if direction else None
-    }
-
 def translate_duration(dur):
     mapping = {
         "day": "يوم",
@@ -85,6 +67,7 @@ def translate_direction(dir):
     mapping = {"going": "ذهاب", "return": "عودة"}
     return mapping.get(dir, dir)
 
+# --- normalize pickup/dropoff ---
 def normalize_point(point):
     if isinstance(point, dict):
         lat = safe_get(point, "lat", "latitude")
@@ -98,6 +81,15 @@ def normalize_point(point):
         return geocode_address(point)
     return None
 
+# --- extract duration/direction from columns ---
+def extract_duration_direction(duration, direction):
+    return {
+        "duration_en": duration,
+        "direction_en": direction,
+        "duration_ar": translate_duration(duration),
+        "direction_ar": translate_direction(direction)
+    }
+
 # --- Flask route ---
 @app.route("/extract", methods=["POST"])
 def extract():
@@ -105,14 +97,15 @@ def extract():
     
     pickup = safe_get(data, "pickup", "origin", "from")
     dropoff = safe_get(data, "dropoff", "destination", "to")
-    trip_info = safe_get(data, "duration") or safe_get(data, "direction") or safe_get(data, "trip_info")
+    duration = safe_get(data, "duration")
+    direction = safe_get(data, "direction")
     
     pickup_info = normalize_point(pickup)
     dropoff_info = normalize_point(dropoff)
     distance_km = haversine(pickup_info.get("lat"), pickup_info.get("lng"),
                             dropoff_info.get("lat"), dropoff_info.get("lng")) if pickup_info and dropoff_info else None
 
-    dur_dir = extract_duration_direction(trip_info)
+    dur_dir = extract_duration_direction(duration, direction)
     
     result = {
         "pickup": pickup_info,
