@@ -1,93 +1,95 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List, Union
-import googlemaps
-from math import radians, cos, sin, asin, sqrt
+from flask import Flask, request, jsonify
+import requests
+import math
 import json
-from diskcache import Cache
 
-API_KEY = 'YOUR_GOOGLE_MAPS_API_KEY'
-gmaps = googlemaps.Client(key=API_KEY)
+app = Flask(__name__)
 
-cache = Cache('location_cache')  # cache للـGoogle Maps
+GOOGLE_API_KEY = "YAIzaSyCQPCCKyScLV1CUElhBH5a8is8KFBjuYeA"  # 🔹 حطي هنا الـ API Key بتاعتك
 
-app = FastAPI()
+# ---- Helper: Haversine Formula لحساب المسافة ----
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371  # نصف قطر الأرض بالكيلومتر
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda/2)**2
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
-class Trip(BaseModel):
-    PickUp: Union[str, dict]
-    DropOff: Union[str, dict]
-
-class TripsBatch(BaseModel):
-    trips: List[Trip]
-
-# --- دالة extract مع cache و fallback ---
-def extract_location_data(address):
+# ---- Helper: Smart Extract ----
+def smart_extract_location(data_str):
     try:
-        # لو العنوان JSON بدل نص
-        if isinstance(address, dict):
-            address = address.get('address', '')  
-
-        if not address:
-            return None, None, None, None
-
-        # check cache
-        if address in cache:
-            return cache[address]
-
-        geocode_result = gmaps.geocode(address)
-        if not geocode_result:
-            return None, None, None, None
-        result = geocode_result[0]
-
-        lat = result['geometry']['location']['lat']
-        lng = result['geometry']['location']['lng']
-
-        city = None
-        district = None
-        for comp in result['address_components']:
-            if 'locality' in comp['types']:
-                city = comp['long_name']
-            if 'sublocality' in comp['types'] or 'neighborhood' in comp['types']:
-                district = comp['long_name']
-        if not district:
-            district = city
-
-        cache[address] = (city, district, lat, lng)  # حفظ في cache
-        return city, district, lat, lng
+        data = json.loads(data_str)
     except:
-        return None, None, None, None
+        return None
 
-# --- دالة حساب المسافة ---
-def haversine(lat1, lon1, lat2, lon2):
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    dlon = lon2 - lon1 
-    dlat = lat2 - lat1 
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * asin(sqrt(a)) 
-    r = 6371
-    return c * r
+    lat, lng, city, district = None, None, None, None
 
-# --- API endpoint batch ---
-@app.post("/process_trips_batch/")
-def process_trips_batch(batch: TripsBatch):
-    results = []
-    for trip in batch.trips:
-        pickup_city, pickup_district, pickup_lat, pickup_lng = extract_location_data(trip.PickUp)
-        drop_city, drop_district, drop_lat, drop_lng = extract_location_data(trip.DropOff)
-        
-        distance = None
-        if pickup_lat and drop_lat:
-            distance = haversine(pickup_lat, pickup_lng, drop_lat, drop_lng)
-        
-        results.append({
-            "PickUp_City": pickup_city,
-            "PickUp_District": pickup_district,
-            "PickUp_Lat": pickup_lat,
-            "PickUp_Lng": pickup_lng,
-            "DropOff_City": drop_city,
-            "DropOff_District": drop_district,
-            "DropOff_Lat": drop_lat,
-            "DropOff_Lng": drop_lng,
-            "Distance_km": distance
+    # لو موجود lat/lng صريح
+    for k, v in data.items():
+        if 'lat' in k.lower(): lat = v
+        if 'lng' in k.lower() or 'lon' in k.lower(): lng = v
+
+    # لو موجود formatted_address أو placeName
+    address = data.get("formatted_address") or data.get("placeName") or ""
+    if address:
+        params = {"address": address, "key": GOOGLE_API_KEY}
+        res = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params).json()
+        if res["status"] == "OK":
+            result = res["results"][0]
+            loc = result["geometry"]["location"]
+            lat, lng = loc["lat"], loc["lng"]
+            for comp in result["address_components"]:
+                if "locality" in comp["types"]:
+                    city = comp["long_name"]
+                if "sublocality" in comp["types"] or "neighborhood" in comp["types"]:
+                    district = comp["long_name"]
+
+    if lat and lng and not city:
+        # Reverse geocoding لو مفيش city
+        params = {"latlng": f"{lat},{lng}", "key": GOOGLE_API_KEY}
+        res = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params).json()
+        if res["status"] == "OK":
+            result = res["results"][0]
+            for comp in result["address_components"]:
+                if "locality" in comp["types"]:
+                    city = comp["long_name"]
+                if "sublocality" in comp["types"] or "neighborhood" in comp["types"]:
+                    district = comp["long_name"]
+
+    return {"city": city, "district": district, "lat": lat, "lng": lng}
+
+@app.route("/process", methods=["POST"])
+def process_data():
+    rows = request.get_json()
+    output = []
+
+    for row in rows:
+        pickup_info = smart_extract_location(row.get("pickup", ""))
+        dropoff_info = smart_extract_location(row.get("dropoff", ""))
+
+        if pickup_info and dropoff_info:
+            dist_km = calculate_distance(
+                pickup_info["lat"], pickup_info["lng"],
+                dropoff_info["lat"], dropoff_info["lng"]
+            )
+        else:
+            dist_km = None
+
+        output.append({
+            **row,
+            "pickup_city": pickup_info.get("city"),
+            "pickup_district": pickup_info.get("district"),
+            "pickup_lat": pickup_info.get("lat"),
+            "pickup_lng": pickup_info.get("lng"),
+            "dropoff_city": dropoff_info.get("city"),
+            "dropoff_district": dropoff_info.get("district"),
+            "dropoff_lat": dropoff_info.get("lat"),
+            "dropoff_lng": dropoff_info.get("lng"),
+            "distance_km": dist_km
         })
-    return {"results": results}
+
+    return jsonify(output)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
